@@ -1,39 +1,50 @@
+
 import streamlit as st
 import pandas as pd
 
-st.set_page_config(page_title="门店金额查询", layout="centered")
-st.title("🔍 门店金额查询系统（权限精确 + 数据内容模糊）")
+st.set_page_config(page_title="门店报表查询", layout="centered")
 
-auth_file = st.file_uploader("请上传权限绑定文件（门店权限模板.xlsx）", type=["xlsx"], key="auth")
-data_file = st.file_uploader("请上传门店数据文件（含多个 sheet）", type=["xlsx"], key="data")
+@st.cache_data
+def load_permission():
+    return pd.read_excel("permission.xlsx", dtype={"查看人员编号": str})
 
-store_input = st.text_input("请输入完整门店名称（与权限表一致）")
-viewer_input = st.text_input("请输入查看人员编号（纯数字）")
-submit = st.button("查询")
+@st.cache_data
+def load_all_data():
+    xls = pd.ExcelFile("data.xlsx")
+    sheet_data = {}
+    for sheet in xls.sheet_names:
+        df = xls.parse(sheet)
+        sheet_data[sheet] = df
+    return sheet_data
 
-if auth_file and data_file and submit:
-    try:
-        auth_df = pd.read_excel(auth_file)
-        auth_dict = dict(zip(auth_df["门店名称"], auth_df["查看人员编号"].astype(str)))
+def main():
+    st.title("📊 门店报表查询系统")
+    st.markdown("请输入您的门店名称与编号，查看专属报表：")
 
-        if store_input not in auth_dict:
-            st.error("❌ 未找到该门店的权限记录")
-        elif auth_dict[store_input] != viewer_input:
-            st.error("⚠️ 编号不匹配，无权限查看该门店数据")
-        else:
-            # 遍历每个 sheet，查找内容中是否包含门店名
-            xls = pd.ExcelFile(data_file)
-            matched_df = None
-            for sheet in xls.sheet_names:
-                df = pd.read_excel(xls, sheet_name=sheet, header=None).astype(str)
-                if df.apply(lambda col: col.str.contains(store_input, na=False)).any().any():
-                    matched_df = df
+    store_name = st.text_input("门店名称")
+    viewer_id = st.text_input("查看人员编号（数字）")
+
+    if store_name and viewer_id:
+        permissions = load_permission()
+        match = permissions[
+            (permissions['门店名称'].astype(str).str.strip() == store_name.strip()) &
+            (permissions['查看人员编号'].astype(str).str.strip() == viewer_id.strip())
+        ]
+
+        if not match.empty:
+            all_data = load_all_data()
+            found = False
+            for sheet_name, df in all_data.items():
+                if store_name in df.values:
+                    found = True
+                    st.success(f"✅ 成功验证权限，正在显示 {store_name} 的报表数据")
+                    matched_rows = df[df.apply(lambda row: row.astype(str).str.contains(store_name), axis=1)]
+                    st.dataframe(matched_rows)
                     break
+            if not found:
+                st.warning("⚠️ 在数据文件中未找到该门店的数据，请联系管理员。")
+        else:
+            st.error("❌ 无权限访问，请检查门店名称与编号是否正确。")
 
-            if matched_df is not None:
-                st.success(f"✅ 在文件中成功匹配包含“{store_input}”内容的门店数据")
-                st.dataframe(matched_df, use_container_width=True)
-            else:
-                st.error("❌ 数据文件中未找到包含该门店名称的内容")
-    except Exception as e:
-        st.error(f"发生错误：{e}")
+if __name__ == "__main__":
+    main()
