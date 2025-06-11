@@ -4,6 +4,7 @@ import pandas as pd
 st.set_page_config(page_title="门店金额查询", layout="centered")
 st.title("🔍 门店金额查询系统")
 
+# 上传权限表 & 数据文件
 auth_file = st.file_uploader("请上传权限绑定文件（门店权限模板.xlsx）", type=["xlsx"], key="auth")
 data_file = st.file_uploader("请上传门店数据文件（含多个 sheet）", type=["xlsx"], key="data")
 
@@ -26,12 +27,12 @@ if auth_file and data_file and submit:
             matched_df = None
 
             for sheet in xls.sheet_names:
-                if store_input in sheet:
+                if store_input in sheet:  # 匹配 sheet 名
                     matched_df = pd.read_excel(xls, sheet_name=sheet, header=None)
                     break
                 else:
                     df = pd.read_excel(xls, sheet_name=sheet, header=None)
-                    if store_input in df.astype(str).values:
+                    if store_input in df.astype(str).values:  # 匹配表格内容
                         matched_df = df
                         break
 
