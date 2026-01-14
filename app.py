@@ -149,8 +149,11 @@ class DatabaseManager:
             self.db = None
             self.client = None
     
+    # ... (前面的代码保持不变)
+
     def _create_indexes(self):
         """创建索引"""
+        # 修改点 1: 改为 is None
         if self.db is None: return
         try:
             self.db['stores'].create_index([("store_code", 1)], background=True)
@@ -164,12 +167,15 @@ class DatabaseManager:
         return self.db
     
     def is_connected(self):
+        # 修改点 2: 改为 is not None
         return self.db is not None
 
     # --- 新增功能方法 ---
+
     def save_guide_pdf(self, file_obj):
         """保存财务指引PDF"""
-        if not self.fs: return False
+        # gridfs 对象同理，建议也改为显式判断
+        if self.fs is None: return False
         try:
             old = self.fs.find_one({"filename": "guide.pdf"})
             if old: self.fs.delete(old._id)
@@ -179,13 +185,16 @@ class DatabaseManager:
 
     def get_guide_pdf(self):
         """获取财务指引PDF"""
-        if not self.fs: return None
+        if self.fs is None: return None
         try: return self.fs.find_one({"filename": "guide.pdf"})
         except: return None
 
     def save_offline_cost(self, store_id, month, data):
         """保存线下成本"""
-        if not self.db: return False
+        # 修改点 3: 这里的报错就是因为这行代码
+        # 原代码: if not self.db: return False
+        # 修改后:
+        if self.db is None: return False
         try:
             self.db["offline_costs"].update_one(
                 {"store_id": store_id, "month": month},
@@ -204,7 +213,8 @@ class DatabaseManager:
 
     def get_offline_cost(self, store_id, month):
         """获取单条线下成本"""
-        if not self.db: return {}
+        # 修改点 4: 改为 is None
+        if self.db is None: return {}
         try:
             res = self.db["offline_costs"].find_one({"store_id": store_id, "month": month})
             return res.get("data", {}) if res else {}
@@ -212,7 +222,8 @@ class DatabaseManager:
 
     def get_all_offline_costs(self):
         """获取所有线下成本(后台下载用)"""
-        if not self.db: return []
+        # 修改点 5: 改为 is None
+        if self.db is None: return []
         try:
             return list(self.db["offline_costs"].find({}, {"_id": 0}).sort("store_id", 1))
         except: return []
