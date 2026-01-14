@@ -1,10 +1,14 @@
-# streamlit_app.py - 门店报表系统 (格式化修复版)
+# streamlit_app.py - 门店报表系统 (UI/UX 终极修正版)
 """
 包含所有模块：
 1. 门店查询：带双层表头、特定行变色、自动读取总部分润、线下成本录入(垂直无步进)。
 2. 批量上传：解析Excel、存入MongoDB。
 3. 权限管理：权限表导入、PDF管理、线下成本数据下载。
-4. 修复：数据库连接判断、缺少的方法、数值格式化报错。
+4. 修复：
+   - 强制移除原表注释列，使用硬编码。
+   - 序号列转为纯文本。
+   - 隐藏表头中的 _empty_ 字样。
+   - 表头颜色区分（淡蓝/淡黄）。
 """
 
 import streamlit as st
@@ -418,6 +422,9 @@ def get_base64_of_bin_file(bin_file):
     return base64.b64encode(data).decode()
 
 def add_meta_columns(df: pd.DataFrame) -> pd.DataFrame:
+    # 强制去掉原表的注释列，防止重复
+    if '注释' in df.columns: del df['注释']
+    
     comments, seqs = [], []
     for item in df['费项']:
         key = str(item).strip()
@@ -425,15 +432,15 @@ def add_meta_columns(df: pd.DataFrame) -> pd.DataFrame:
         comments.append(meta.get("comment", ""))
         seqs.append(meta.get("seq", np.nan))
     
-    if '注释' not in df.columns: df.insert(1, '注释', comments)
-    if '序号' not in df.columns: df.insert(2, '序号', seqs)
+    df.insert(1, '注释', comments)
+    df.insert(2, '序号', seqs)
     return df
 
 def apply_advanced_style(df: pd.DataFrame):
-    # 识别数值列
+    # 识别数值列 (排除费项、注释、序号、空列)
     numeric_cols = [c for c in df.columns if c[1] not in ['费项', '注释', '序号', ' ']]
     
-    # 1. 定义安全格式化函数，避免ValueError
+    # 1. 定义安全格式化函数
     def safe_fmt(x):
         try:
             if pd.isna(x) or str(x).strip() == "": return "-"
@@ -443,7 +450,7 @@ def apply_advanced_style(df: pd.DataFrame):
 
     format_dict = {c: safe_fmt for c in numeric_cols}
     
-    # 2. 序号列格式
+    # 2. 序号列格式 (转文本)
     seq_cols = [c for c in df.columns if c[1] == '序号']
     for c in seq_cols:
         def seq_fmt(x):
@@ -458,13 +465,13 @@ def apply_advanced_style(df: pd.DataFrame):
         except: item_name = ""
         bg, fc, fw, bd = "white", "black", "normal", ""
         
-        # 1. 净利润, 4、余额: 灰底红字加粗
+        # 1. 净利润, 4、余额
         if "净利润" in item_name or "4、余额" in item_name:
             bg, fc, fw, bd = "#F2F2F2", "#D9534F", "bold", "2px solid #333"
-        # 2. 线上净利润, 线上余额: 灰底黑字加粗
+        # 2. 线上净利润, 线上余额
         elif "线上净利润" in item_name or "线上余额" in item_name:
             bg, fc, fw = "#F2F2F2", "#000000", "bold"
-        # 3. 总部应收未收: 绿底黑字
+        # 3. 总部应收未收
         elif "总部应收未收金额" in item_name:
             bg, fc = "#D4EDDA", "#000000"
         # 4. 其他
@@ -481,15 +488,18 @@ def apply_advanced_style(df: pd.DataFrame):
 
     styler = styler.apply(row_style, axis=1)
     
+    # 列样式
     styler = styler.applymap(lambda x: "min-width: 180px; text-align: left;", subset=[c for c in df.columns if c[1]=='费项'])
     styler = styler.applymap(lambda x: "color: #888888; font-style: italic; font-size: 0.9em; min-width: 200px; white-space: normal;", subset=[c for c in df.columns if c[1]=='注释'])
     styler = styler.applymap(lambda x: "text-align: center;", subset=[c for c in df.columns if c[1]=='序号'])
     styler = styler.applymap(lambda x: "background-color: white; border: none; width: 20px;", subset=[c for c in df.columns if c[0]==' '])
 
+    # 表头样式
     styles = [
         {'selector': 'th', 'props': [('text-align', 'center'), ('border', '1px solid #ddd'), ('vertical-align', 'middle')]},
-        {'selector': 'th:contains("利润表")', 'props': [('background-color', '#E8F0FE !important'), ('color', '#1a73e8')]},
-        {'selector': 'th:contains("现金表")', 'props': [('background-color', '#FFFFE0 !important'), ('color', '#d4a017')]},
+        {'selector': 'th:contains("利润表")', 'props': [('background-color', '#E8F0FE !important'), ('color', '#1a73e8'), ('font-weight', 'bold')]},
+        {'selector': 'th:contains("现金表")', 'props': [('background-color', '#FFFFE0 !important'), ('color', '#d4a017'), ('font-weight', 'bold')]},
+        # 隐藏 _empty_ 表头文字
         {'selector': 'th:contains("_empty_")', 'props': [('background-color', 'white'), ('border', 'none'), ('color', 'transparent')]},
     ]
     styler = styler.set_table_styles(styles)
