@@ -1,11 +1,11 @@
-# streamlit_app.py - 门店报表系统 (多月录入 & 列重构终极版)
+# streamlit_app.py - 门店报表系统 (最终完美版)
 """
-包含所有模块：
+功能全集：
 1. 门店查询：
-   - [新增] 月份选择器：用户可选择针对哪个月份录入成本。
-   - [重构] 注入逻辑：遍历报表所有月份列，分别从DB读取成本并计算净利润。
-   - [重构] 列处理：强制重组列顺序(费项-注释-序号-数据)，彻底解决重复列问题。
-   - UI：垂直窄表单、无步进器。
+   - [表头] 单层表头，左蓝右黄分色，中间白色分隔。
+   - [数据] 自动清洗重复的表头行。
+   - [录入] 1-12月固定选项，支持任意月份注入。
+   - [UI] 垂直窄表单、无步进器。
 2. 批量上传 & 权限管理：功能保持完整。
 """
 
@@ -28,7 +28,6 @@ import time
 # 1. 常量定义
 # ==========================================
 REPORT_META_MAP = {
-    # === 利润表 Items ===
     "1、线上毛利": {"seq": 1, "comment": "计费基准项。还原所有利润与费用后的综合获利基数。"},
     "1、回款": {"seq": 1, "comment": "核心流入基准。门店本期实际入账的总金额(到账净额)。"},
     "--利润项": {"seq": 2, "comment": "经营总盘子。反映本月线上业务产生的各类收入及补贴总额。"},
@@ -53,17 +52,13 @@ REPORT_META_MAP = {
     "------仓内损耗": {"seq": 24, "comment": "实际归属于当月的物流费"},
     "------售后损耗": {"seq": 25, "comment": "实际归属于当月的税金"}, 
     "--其他费用": {"seq": 26, "comment": "实际归属于当月的其他费用"},
-    
-    # 线下部分
     "3、线下成本": {"seq": 17, "comment": "线下损益分摊。核算线下经营对总利润的损耗。"}, 
     "3、线下支出": {"seq": 17, "comment": "门店硬性开支。所有线下实体经营产生的现金支出。"}, 
-    
     "------人工工资": {"seq": 17, "comment": "当月实际发放工资，包含绩效、福利费、奖金"},
     "------仓库房租": {"seq": 18, "comment": "本月实际支付给房东的仓库或店面租金。"},
     "------物业水电": {"seq": 19, "comment": "本月实付的物业管理费、清扫费及保安费等。"},
     "------耗材成本": {"seq": 21, "comment": "本月实际支付出去的应用耗材费"},
     "------其他支出": {"seq": 22, "comment": "门店发生的其他杂项现金支出。"}, 
-    
     "净利润": {"seq": 999, "comment": "最终经营成果。计算公式：线上毛利 - 总部分润 - 线下成本。"},
 }
 
@@ -256,8 +251,10 @@ class PermissionManager:
                 if not q or not s: continue
                 store = self.stores.find_one({"store_name": s})
                 if not store:
-                    store = StoreModel.create_store_document(s, created_by='perm')
-                    self.stores.insert_one(store)
+                    store = self.stores.find_one({"aliases": s_name})
+                    if not store:
+                        store = StoreModel.create_store_document(s, created_by='perm')
+                        self.stores.insert_one(store)
                 perm = PermissionModel.create_permission_document(q, store)
                 if self.perms.find_one({"query_code": q}):
                     self.perms.replace_one({"query_code": q}, perm); res["updated"] += 1
@@ -268,20 +265,13 @@ class PermissionManager:
     def delete_permission(self, c): self.perms.delete_one({"query_code": c})
 
 # ==========================================
-# 5. 辅助函数 (样式与计算) - 重点修复区域
+# 5. 辅助函数 (样式与计算)
 # ==========================================
 def get_base64_of_bin_file(bin_file):
     data = bin_file.read()
     return base64.b64encode(data).decode()
 
 def add_meta_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    重构列逻辑：
-    1. 清洗费项
-    2. 生成注释、序号
-    3. 暴力重组：只保留 [费项, 注释, 序号, ...所有数据列...]
-    """
-    # 1. 清洗费项名称
     if '费项' in df.columns:
         def clean_name(x):
             s = str(x).strip().replace('\n', '').replace('（需合伙人补充）', '')
@@ -289,7 +279,6 @@ def add_meta_columns(df: pd.DataFrame) -> pd.DataFrame:
             return s
         df['费项'] = df['费项'].apply(clean_name)
 
-    # 2. 准备新列数据
     comments, seqs = [], []
     for item in df['费项']:
         key = str(item)
@@ -298,25 +287,15 @@ def add_meta_columns(df: pd.DataFrame) -> pd.DataFrame:
         s = meta.get("seq")
         seqs.append(str(int(s)) if pd.notnull(s) else "")
     
-    # 3. 构造新 DataFrame (白名单机制，彻底防止重复)
-    # 找出所有非元数据列（即月份列）
-    exclude_cols = ['费项', '注释', '序号']
-    # 过滤掉原表中可能残留的垃圾列
-    month_cols = [c for c in df.columns if c not in exclude_cols and '注释' not in str(c) and '序号' not in str(c)]
+    df['注释'] = comments
+    df['序号'] = seqs
     
-    new_df = pd.DataFrame()
-    new_df['费项'] = df['费项']
-    new_df['注释'] = comments
-    new_df['序号'] = seqs
-    
-    # 拼接月份数据
-    for col in month_cols:
-        new_df[col] = df[col]
-        
-    return new_df
+    fixed_cols = ['费项', '注释', '序号']
+    other_cols = [c for c in df.columns if c not in fixed_cols]
+    return df[fixed_cols + other_cols]
 
-def apply_advanced_style(df: pd.DataFrame):
-    numeric_cols = [c for c in df.columns if c[1] not in ['费项', '注释', '序号', ' ']]
+def apply_advanced_style(df: pd.DataFrame, split_index: int):
+    numeric_cols = [c for c in df.columns if c not in ['费项', '注释', '序号', ' ']]
     def safe_fmt(x):
         try:
             if pd.isna(x) or str(x).strip() == "": return "-"
@@ -325,18 +304,31 @@ def apply_advanced_style(df: pd.DataFrame):
     format_dict = {c: safe_fmt for c in numeric_cols}
     styler = df.style.format(format_dict)
 
-    # 表头颜色 (map_index)
-    def header_style(x):
-        s = str(x)
-        if "利润表" in s: return "background-color: #E8F0FE; color: #1a73e8; font-weight: bold; text-align: center; border: 1px solid #ddd;"
-        if "现金表" in s: return "background-color: #FFFFE0; color: #d4a017; font-weight: bold; text-align: center; border: 1px solid #ddd;"
-        if "_empty_" in s or s.strip() == "": return "background-color: white; border: none; color: transparent;"
-        return "text-align: center; border: 1px solid #ddd; vertical-align: middle;"
-    styler.map_index(header_style, axis=1, level=0)
+    # 单层表头分色逻辑 (CSS nth-child)
+    styles = []
+    # 基础
+    styles.append({'selector': 'th', 'props': [('border', '1px solid #ddd'), ('text-align', 'center'), ('vertical-align', 'middle')]})
     
-    def level1_style(x):
-        return "background-color: #F8F9FA; color: #333; font-weight: bold; text-align: center; border: 1px solid #ddd;"
-    styler.map_index(level1_style, axis=1, level=1)
+    # 利润表区域 (蓝色)
+    for i in range(1, split_index + 1):
+        styles.append({
+            'selector': f'th:nth-child({i})',
+            'props': [('background-color', '#E8F0FE'), ('color', '#1a73e8'), ('font-weight', 'bold')]
+        })
+        
+    # 分隔列 (白色)
+    styles.append({
+        'selector': f'th:nth-child({split_index + 1})',
+        'props': [('background-color', 'white'), ('border', 'none'), ('color', 'transparent')]
+    })
+    
+    # 现金表区域 (黄色)
+    total_cols = len(df.columns)
+    for i in range(split_index + 2, total_cols + 1):
+        styles.append({
+            'selector': f'th:nth-child({i})',
+            'props': [('background-color', '#FFFFE0'), ('color', '#d4a017'), ('font-weight', 'bold')]
+        })
 
     def row_style(row):
         try: item_name = str(row[0]).strip() 
@@ -357,15 +349,15 @@ def apply_advanced_style(df: pd.DataFrame):
         css = f"background-color: {bg}; color: {fc}; font-weight: {fw};"
         if bd: css += f"border-top: {bd}; border-bottom: {bd};"
         return [css] * len(row)
+    
     styler = styler.apply(row_style, axis=1)
     
-    styler = styler.applymap(lambda x: "min-width: 180px; text-align: left;", subset=[c for c in df.columns if c[1]=='费项'])
-    styler = styler.applymap(lambda x: "color: #888888; font-style: italic; font-size: 0.9em; min-width: 200px; white-space: normal;", subset=[c for c in df.columns if c[1]=='注释'])
-    styler = styler.applymap(lambda x: "text-align: center;", subset=[c for c in df.columns if c[1]=='序号'])
-    styler = styler.applymap(lambda x: "background-color: white; border: none; width: 20px;", subset=[c for c in df.columns if c[0]==' '])
+    styler = styler.applymap(lambda x: "min-width: 180px; text-align: left;", subset=[c for c in df.columns if c=='费项'])
+    styler = styler.applymap(lambda x: "color: #888888; font-style: italic; font-size: 0.9em; min-width: 200px; white-space: normal;", subset=[c for c in df.columns if c=='注释'])
+    styler = styler.applymap(lambda x: "text-align: center;", subset=[c for c in df.columns if c=='序号'])
+    styler = styler.applymap(lambda x: "background-color: white; border: none; width: 20px;", subset=[c for c in df.columns if c==' '])
     
-    styles = [{'selector': 'th:contains("_empty_")', 'props': [('background-color', 'white'), ('border', 'none'), ('color', 'transparent')]}]
-    styler = styler.set_table_styles(styles)
+    styler.set_table_styles(styles)
     return styler
 
 def rebuild_dataframe_with_headers(raw_data, headers):
@@ -380,23 +372,28 @@ def rebuild_dataframe_with_headers(raw_data, headers):
         if h == "": unique_headers.append(f"_empty_{ec}"); ec += 1
         else: unique_headers.append(h)
     df = pd.DataFrame(data, columns=unique_headers)
+    
+    if not df.empty:
+        first_row = df.iloc[0].astype(str).tolist()
+        has_month = any("月" in x for x in first_row)
+        has_bad_header = any("_empty_" in h or h == "" for h in unique_headers)
+        if has_month and has_bad_header:
+            df.columns = first_row
+            df = df.iloc[1:].reset_index(drop=True)
+            
     if len(df.columns) > 0: df.rename(columns={df.columns[0]: '费项'}, inplace=True)
+    
+    # 核心修复：过滤重复的表头行
+    if '费项' in df.columns:
+        df = df[df['费项'] != '费项']
+        
     return df.fillna("")
 
 def inject_offline_and_calculate(df: pd.DataFrame, store_id: str, db_manager):
-    """
-    全量计算逻辑：
-    1. 识别所有月份列。
-    2. 遍历每个月，从DB查该月的线下成本。
-    3. 注入数据并计算净利润。
-    """
     if df.empty: return df
-    
-    # 识别数据列 (排除元数据列)
     data_cols = [c for c in df.columns if c not in ['费项', '注释', '序号']]
     if not data_cols: return df
     
-    # 辅助函数：从表里安全取数
     def get_table_val(name, col):
         rows = df[df['费项'] == name]
         if rows.empty: return 0.0
@@ -404,23 +401,12 @@ def inject_offline_and_calculate(df: pd.DataFrame, store_id: str, db_manager):
         try: return float(str(val).replace(',', '').replace('¥', ''))
         except: return 0.0
 
-    # 遍历每一列（每一个月）进行处理
     for m in data_cols:
-        # 1. 尝试从DB获取该月的线下成本
-        # 注意：DB中的 key 是 report_month (如 "2023-10")，但表头可能是 "10月"
-        # 这里为了简化，我们假设 DB 存储时已经用了和表头一致的 key，或者我们做简单模糊匹配
-        # 更好的方式：保存时让用户选的就是表头里的字串
-        
-        # 从DB查数据
-        record = db_manager.get_offline_cost(store_id, m) # m is e.g. "10月" or "11月"
-        cost_data = record if record else {}
-        
-        # 辅助函数：从DB记录取数
+        record = db_manager.get_offline_cost(store_id, m)
         def get_db_v(key):
-            v = cost_data.get(key)
+            v = record.get('data', {}).get(key)
             return float(v) if v is not None else 0.0
 
-        # 映射
         mapping = {
             "------人工工资": get_db_v('wages'),
             "------仓库房租": get_db_v('rent'),
@@ -429,31 +415,22 @@ def inject_offline_and_calculate(df: pd.DataFrame, store_id: str, db_manager):
             "------其他支出": get_db_v('others') 
         }
         
-        # 只有当DB里有数据时才注入，否则保留原表数据(或置0)
-        # 这里策略：如果有记录就覆盖，没记录就不动(假设原表可能有数据)
         if record:
             for k, v in mapping.items():
                 if k in df['费项'].values: df.loc[df['费项']==k, m] = v
-            
-            # 更新汇总行
             total_offline = sum(mapping.values())
             target_row = "3、线下成本" if "3、线下成本" in df['费项'].values else "3、线下支出"
-            if target_row in df['费项'].values:
-                df.loc[df['费项']==target_row, m] = total_offline
+            if target_row in df['费项'].values: df.loc[df['费项']==target_row, m] = total_offline
         else:
-            # 如果DB没数据，尝试读取表里现有的汇总值用于计算净利润
             target_row = "3、线下成本" if "3、线下成本" in df['费项'].values else "3、线下支出"
             total_offline = get_table_val(target_row, m)
 
-        # 2. 计算净利润
         try:
             v_online = get_table_val("1、线上毛利", m)
             v_hq = get_table_val("------总部分润（应收）", m)
-            # 净利润 = 线上毛利 - 总部分润 - 线下成本
             if "净利润" in df['费项'].values:
                 df.loc[df['费项']=="净利润", m] = v_online - v_hq - total_offline
         except: pass
-        
     return df
 
 # ==========================================
@@ -464,7 +441,6 @@ def render_query_system(db_manager):
     db = db_manager.get_database()
     
     if 'authenticated' not in st.session_state: st.session_state.authenticated = False
-    
     if not st.session_state.authenticated:
         c1, c2, c3 = st.columns([1, 2, 1])
         with c2:
@@ -484,14 +460,12 @@ def render_query_system(db_manager):
     store = st.session_state.store_info
     st.title(f"📊 {store['store_name']}")
     
-    # 1. 准备数据
     reports = list(db['reports'].find({'store_id': store['_id']}).sort('report_month', -1))
     if not reports: st.warning("暂无报表数据"); return
     
     report = reports[0]
     df_full = rebuild_dataframe_with_headers(report.get('raw_excel_data', []), report.get('table_headers', []))
     
-    # 2. 智能拆分利润表和现金表
     try:
         mid = len(df_full.columns) // 2
         df_profit = df_full.iloc[:, :mid].copy()
@@ -500,54 +474,46 @@ def render_query_system(db_manager):
         if len(df_cash.columns) > 0: df_cash.rename(columns={df_cash.columns[0]: '费项'}, inplace=True)
     except: df_profit = df_full.copy(); df_cash = df_full.copy()
 
-    # 3. 提取月份列 (用于选择器)
-    # 先应用add_meta_columns来清洗费项，但不保留注释列以便获取纯净的月份列
-    temp_df = add_meta_columns(df_profit.copy()) 
-    # 排除非月份列
-    month_options = [c for c in temp_df.columns if c not in ['费项', '注释', '序号']]
-    # 默认选最后一个（最新）
-    default_ix = len(month_options) - 1 if month_options else 0
+    month_options = [f"{i}月" for i in range(1, 13)]
+    current_month_str = f"{datetime.now().month}月"
+    try: default_ix = month_options.index(current_month_str)
+    except: default_ix = 0
 
-    # 4. 线下成本录入区域 (带月份选择)
     with st.expander("📝 录入线下成本", expanded=True):
-        col_m, col_f = st.columns([1, 2])
-        with col_m:
+        col_input, _ = st.columns([1, 2])
+        with col_input:
             selected_month = st.selectbox("选择月份", month_options, index=default_ix)
-        
-        with col_f:
             with st.form("cost_form"):
-                st.caption(f"正在录入 **{selected_month}** 的数据")
                 w = st.number_input("人工工资", min_value=0.0, value=None, step=None, format="%.2f")
                 r = st.number_input("仓库房租", min_value=0.0, value=None, step=None, format="%.2f")
                 u = st.number_input("物业水电", min_value=0.0, value=None, step=None, format="%.2f")
                 c = st.number_input("耗材成本", min_value=0.0, value=None, step=None, format="%.2f")
                 o = st.number_input("--其他支出", min_value=0.0, value=None, step=None, format="%.2f")
-                
                 if st.form_submit_button("提交并刷新报表", type="primary"):
                     data = {"wages": w, "rent": r, "utilities": u, "consumables": c, "others": o}
-                    # 存入前将None转为0
                     save_data = {k: (v if v is not None else 0.0) for k, v in data.items()}
-                    # 使用选中的月份作为key保存
                     db_manager.save_offline_cost(store['_id'], selected_month, save_data)
-                    st.success(f"{selected_month} 数据已保存！")
+                    st.session_state.cost_submitted = True
+                    st.success("保存成功！")
                     time.sleep(0.5)
                     st.rerun()
 
-    # 5. 数据处理与计算 (对所有月份)
-    # 注意：add_meta_columns现在是重构列，所以先处理
+    if not st.session_state.get('cost_submitted', False):
+        st.info("👆 请先在上选择月份并录入线下成本，点击提交后查看报表。")
+        return 
+
     df_profit = add_meta_columns(df_profit)
     df_cash = add_meta_columns(df_cash)
     
-    # 注入数据
     df_profit = inject_offline_and_calculate(df_profit, store['_id'], db_manager)
+    if selected_month not in df_profit.columns:
+        df_profit[selected_month] = 0.0
+        df_profit = inject_offline_and_calculate(df_profit, store['_id'], db_manager)
+
+    # 记录列数用于分色
+    n_profit = len(df_profit.columns)
     
-    # 6. 组装展示
-    p_cols = [("表一：利润表", c) for c in df_profit.columns]
-    df_profit.columns = pd.MultiIndex.from_tuples(p_cols)
-    c_cols = [("表二：现金表", c) for c in df_cash.columns]
-    df_cash.columns = pd.MultiIndex.from_tuples(c_cols)
-    
-    df_sep = pd.DataFrame(np.nan, index=df_profit.index, columns=[(" ", " ")])
+    df_sep = pd.DataFrame(np.nan, index=df_profit.index, columns=[" "])
     min_rows = min(len(df_profit), len(df_cash))
     df_display = pd.concat([df_profit.iloc[:min_rows], df_sep.iloc[:min_rows], df_cash.iloc[:min_rows]], axis=1).fillna("")
     
@@ -564,7 +530,7 @@ def render_query_system(db_manager):
         st.markdown(f"""<div style="background:{color};padding:15px;border-radius:10px;text-align:center;color:white;margin-bottom:20px;"><div style="font-size:20px;">{text}</div><div style="font-size:28px;font-weight:bold;">¥{abs(recv):,.2f}</div></div>""", unsafe_allow_html=True)
     except: pass
 
-    st.dataframe(apply_advanced_style(df_display), use_container_width=True, height=600)
+    st.dataframe(apply_advanced_style(df_display, n_profit), use_container_width=True, height=600)
 
 def create_upload_app():
     st.title("📤 批量上传系统")
