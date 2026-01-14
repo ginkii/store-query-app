@@ -1,14 +1,10 @@
-# streamlit_app.py - 门店报表系统 (UI/UX 终极修正版)
+# streamlit_app.py - 门店报表系统 (UI修复 & 数据注入修正版)
 """
 包含所有模块：
-1. 门店查询：带双层表头、特定行变色、自动读取总部分润、线下成本录入(垂直无步进)。
-2. 批量上传：解析Excel、存入MongoDB。
-3. 权限管理：权限表导入、PDF管理、线下成本数据下载。
-4. 修复：
-   - 强制移除原表注释列，使用硬编码。
-   - 序号列转为纯文本。
-   - 隐藏表头中的 _empty_ 字样。
-   - 表头颜色区分（淡蓝/淡黄）。
+1. 门店查询：
+   - UI优化：线下成本填写框变窄(1/3宽度)、垂直排列、无默认值、无加减按钮。
+   - 核心修复：增加费项名称清洗逻辑，解决因换行符/名称不一致导致数据无法写入报表的问题。
+2. 批量上传 & 权限管理：功能保持完整。
 """
 
 import streamlit as st
@@ -55,13 +51,16 @@ REPORT_META_MAP = {
     "------仓内损耗": {"seq": 24, "comment": "实际归属于当月的物流费"},
     "------售后损耗": {"seq": 25, "comment": "实际归属于当月的税金"}, 
     "--其他费用": {"seq": 26, "comment": "实际归属于当月的其他费用"},
+    
+    # 线下部分 (兼容多种命名)
     "3、线下成本": {"seq": 17, "comment": "线下损益分摊。核算线下经营对总利润的损耗。"}, 
-    "3、线下支出": {"seq": 16, "comment": "门店硬性开支。所有线下实体经营产生的现金支出。"}, 
+    "3、线下支出": {"seq": 17, "comment": "门店硬性开支。所有线下实体经营产生的现金支出。"}, 
     "------人工工资支出": {"seq": 17, "comment": "当月实际发放工资，包含绩效、福利费、奖金"},
     "------仓库房租支出": {"seq": 18, "comment": "本月实际支付给房东的仓库或店面租金。"},
     "------物业水电支出": {"seq": 19, "comment": "本月实付的物业管理费、清扫费及保安费等。"},
     "------耗材成本支出": {"seq": 21, "comment": "本月实际支付出去的应用耗材费"},
-    "------其他费用": {"seq": 22, "comment": "门店发生的其他杂项现金支出。"}, 
+    "------其他支出": {"seq": 22, "comment": "门店发生的其他杂项现金支出。"}, 
+    
     "净利润": {"seq": 999, "comment": "最终经营成果。计算公式：线上毛利 - 总部分润 - 线下成本。"},
 }
 
@@ -188,7 +187,6 @@ class StoreModel:
             'status': kwargs.get('status', 'active'),
             'aliases': kwargs.get('aliases', [store_name.strip()])
         }
-    
     @staticmethod
     def _generate_store_code(store_name: str) -> str:
         try:
@@ -214,43 +212,34 @@ class ReportModel:
             'updated_at': datetime.now(),
             'uploaded_by': kwargs.get('uploaded_by', 'system')
         }
-    
     @staticmethod
     def dataframe_to_dict_list(df: pd.DataFrame) -> tuple[List[Dict], List[str]]:
         headers = []
         for col in df.columns:
             col_str = str(col)
-            if col_str.startswith('Unnamed:') or 'unnamed' in col_str.lower():
-                headers.append("")
-            else:
-                headers.append(col_str)
-        
+            if col_str.startswith('Unnamed:') or 'unnamed' in col_str.lower(): headers.append("")
+            else: headers.append(col_str)
         unique_headers = []
-        empty_count = 0
+        ec = 0
         for header in headers:
             if header == "":
-                unique_headers.append(f"_empty_{empty_count}")
-                empty_count += 1
-            else:
-                unique_headers.append(header)
-        
+                unique_headers.append(f"_empty_{ec}")
+                ec += 1
+            else: unique_headers.append(header)
         df.columns = unique_headers
         result = []
         for index, row in df.iterrows():
             row_dict = {}
             for col_idx, value in enumerate(row):
                 col_key = f"col_{col_idx}"
-                if pd.isna(value):
-                    row_dict[col_key] = ""
-                elif isinstance(value, (int, float)):
-                    row_dict[col_key] = float(value) if not pd.isna(value) else 0.0
+                if pd.isna(value): row_dict[col_key] = ""
+                elif isinstance(value, (int, float)): row_dict[col_key] = float(value)
                 else:
                     value_str = str(value).strip()
                     if value_str.startswith('='):
                         if '平台内支出' in value_str: row_dict[col_key] = "--平台内支出"
                         else: row_dict[col_key] = value_str[1:]
-                    else:
-                        row_dict[col_key] = value_str
+                    else: row_dict[col_key] = value_str
             result.append(row_dict)
         return result, headers
 
@@ -289,13 +278,8 @@ class BulkReportUploader:
             })
             if store: return store
         except: pass
-        
         try:
-            store_data = StoreModel.create_store_document(
-                store_name=sheet_name.strip(),
-                aliases=[sheet_name.strip(), normalized],
-                created_by='bulk_upload'
-            )
+            store_data = StoreModel.create_store_document(store_name=sheet_name.strip(), aliases=[sheet_name.strip(), normalized], created_by='bulk_upload')
             self.stores_collection.insert_one(store_data)
             return store_data
         except: return None
@@ -303,7 +287,6 @@ class BulkReportUploader:
     def process_excel_file(self, file_buffer, report_month: str, clear_history: bool = True, progress_callback=None) -> Dict:
         start_time = time.time()
         result = {'success_count': 0, 'failed_count': 0, 'errors': [], 'processed_stores': [], 'failed_stores': [], 'total_time': 0}
-        
         try:
             if progress_callback: progress_callback(10, "读取Excel文件...")
             excel_data_display = pd.read_excel(file_buffer, sheet_name=None, engine='openpyxl', header=1)
@@ -314,11 +297,9 @@ class BulkReportUploader:
             
             total = len(excel_data_display)
             processed = 0
-            
             for sheet_name in excel_data_display.keys():
                 processed += 1
                 if progress_callback: progress_callback(20 + int(processed/total*70), f"处理: {sheet_name}")
-                
                 try:
                     store = self.find_or_create_store(sheet_name)
                     if not store:
@@ -328,7 +309,6 @@ class BulkReportUploader:
                     
                     df_display = excel_data_display[sheet_name].dropna(axis=1, how='all')
                     df_fin = excel_data_financial[sheet_name].dropna(axis=1, how='all')
-                    
                     if df_display.empty: continue
                     
                     excel_data_dict, headers = ReportModel.dataframe_to_dict_list(df_display)
@@ -336,17 +316,12 @@ class BulkReportUploader:
                     
                     report = ReportModel.create_report_document(store, report_month, excel_data_dict, headers, sheet_name=sheet_name, financial_data=financial_data)
                     self.reports_collection.insert_one(report)
-                    
                     result['success_count'] += 1
                     result['processed_stores'].append({'sheet_name': sheet_name, 'store_name': store['store_name']})
-                    
                 except Exception as e:
                     result['failed_count'] += 1
                     result['errors'].append(f"{sheet_name}: {e}")
-                    
-        except Exception as e:
-            result['errors'].append(str(e))
-            
+        except Exception as e: result['errors'].append(str(e))
         result['total_time'] = time.time() - start_time
         return result
 
@@ -380,24 +355,20 @@ class PermissionManager:
             for c in df.columns:
                 if any(x in str(c).lower() for x in ['查询', 'query', 'code']): q_col = c
                 if any(x in str(c).lower() for x in ['门店', 'store', 'name']): s_col = c
-            
             if not q_col or not s_col: 
                 if len(df.columns) >= 2: q_col, s_col = df.columns[0], df.columns[1]
                 else: return {"success": False, "message": "无法识别列"}
-            
             res = {"success": True, "created": 0, "updated": 0}
             for _, row in df.iterrows():
                 q_code = str(row[q_col]).strip()
                 s_name = str(row[s_col]).strip()
                 if not q_code or not s_name: continue
-                
                 store = self.stores.find_one({"store_name": s_name})
                 if not store:
                     store = self.stores.find_one({"aliases": s_name})
                     if not store:
                         store = StoreModel.create_store_document(s_name, created_by='perm_upload')
                         self.stores.insert_one(store)
-                
                 perm = PermissionModel.create_permission_document(q_code, store)
                 if self.permissions.find_one({"query_code": q_code}):
                     self.permissions.replace_one({"query_code": q_code}, perm)
@@ -422,12 +393,13 @@ def get_base64_of_bin_file(bin_file):
     return base64.b64encode(data).decode()
 
 def add_meta_columns(df: pd.DataFrame) -> pd.DataFrame:
-    # 强制去掉原表的注释列，防止重复
+    # 强制去掉原表的注释列
     if '注释' in df.columns: del df['注释']
     
     comments, seqs = [], []
     for item in df['费项']:
-        key = str(item).strip()
+        # 清洗item名称以匹配字典
+        key = str(item).strip().replace('\n', '').replace('（需合伙人补充）', '')
         meta = REPORT_META_MAP.get(key, {})
         comments.append(meta.get("comment", ""))
         seqs.append(meta.get("seq", np.nan))
@@ -437,20 +409,16 @@ def add_meta_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def apply_advanced_style(df: pd.DataFrame):
-    # 识别数值列 (排除费项、注释、序号、空列)
     numeric_cols = [c for c in df.columns if c[1] not in ['费项', '注释', '序号', ' ']]
     
-    # 1. 定义安全格式化函数
     def safe_fmt(x):
         try:
             if pd.isna(x) or str(x).strip() == "": return "-"
             return "{:,.2f}".format(float(x))
-        except:
-            return str(x)
+        except: return str(x)
 
     format_dict = {c: safe_fmt for c in numeric_cols}
     
-    # 2. 序号列格式 (转文本)
     seq_cols = [c for c in df.columns if c[1] == '序号']
     for c in seq_cols:
         def seq_fmt(x):
@@ -465,16 +433,12 @@ def apply_advanced_style(df: pd.DataFrame):
         except: item_name = ""
         bg, fc, fw, bd = "white", "black", "normal", ""
         
-        # 1. 净利润, 4、余额
         if "净利润" in item_name or "4、余额" in item_name:
             bg, fc, fw, bd = "#F2F2F2", "#D9534F", "bold", "2px solid #333"
-        # 2. 线上净利润, 线上余额
         elif "线上净利润" in item_name or "线上余额" in item_name:
             bg, fc, fw = "#F2F2F2", "#000000", "bold"
-        # 3. 总部应收未收
         elif "总部应收未收金额" in item_name:
             bg, fc = "#D4EDDA", "#000000"
-        # 4. 其他
         elif item_name.startswith("1、"):
             bg, fw = "#F2F2F2", "bold"
         elif item_name.startswith("--") and not item_name.startswith("------"):
@@ -488,18 +452,15 @@ def apply_advanced_style(df: pd.DataFrame):
 
     styler = styler.apply(row_style, axis=1)
     
-    # 列样式
     styler = styler.applymap(lambda x: "min-width: 180px; text-align: left;", subset=[c for c in df.columns if c[1]=='费项'])
     styler = styler.applymap(lambda x: "color: #888888; font-style: italic; font-size: 0.9em; min-width: 200px; white-space: normal;", subset=[c for c in df.columns if c[1]=='注释'])
     styler = styler.applymap(lambda x: "text-align: center;", subset=[c for c in df.columns if c[1]=='序号'])
     styler = styler.applymap(lambda x: "background-color: white; border: none; width: 20px;", subset=[c for c in df.columns if c[0]==' '])
 
-    # 表头样式
     styles = [
         {'selector': 'th', 'props': [('text-align', 'center'), ('border', '1px solid #ddd'), ('vertical-align', 'middle')]},
         {'selector': 'th:contains("利润表")', 'props': [('background-color', '#E8F0FE !important'), ('color', '#1a73e8'), ('font-weight', 'bold')]},
         {'selector': 'th:contains("现金表")', 'props': [('background-color', '#FFFFE0 !important'), ('color', '#d4a017'), ('font-weight', 'bold')]},
-        # 隐藏 _empty_ 表头文字
         {'selector': 'th:contains("_empty_")', 'props': [('background-color', 'white'), ('border', 'none'), ('color', 'transparent')]},
     ]
     styler = styler.set_table_styles(styles)
@@ -511,7 +472,6 @@ def rebuild_dataframe_with_headers(raw_data, headers):
     for row in raw_data:
         vals = [row.get(f"col_{i}", "") for i in range(len(headers))]
         data.append(vals)
-    
     unique_headers = []
     ec = 0
     for h in headers:
@@ -519,31 +479,46 @@ def rebuild_dataframe_with_headers(raw_data, headers):
             unique_headers.append(f"_empty_{ec}")
             ec += 1
         else: unique_headers.append(h)
-        
     df = pd.DataFrame(data, columns=unique_headers)
     if len(df.columns) > 0: df.rename(columns={df.columns[0]: '费项'}, inplace=True)
     return df.fillna("")
 
 def inject_offline_and_calculate(df: pd.DataFrame, offline_data: dict):
     if df.empty: return df
+    
+    # 核心修正：先清洗费项列，去除换行符和备注，确保匹配成功
+    if '费项' in df.columns:
+        df['费项'] = df['费项'].astype(str).str.strip().str.replace('\n', '').str.replace('（需合伙人补充）', '')
+    
     data_cols = [c for c in df.columns if c not in ['费项', '注释', '序号']]
     if not data_cols: return df
     current_month = data_cols[-1]
     
+    # 获取用户输入 (处理 None)
+    def get_v(key):
+        val = offline_data.get(key)
+        return float(val) if val is not None else 0.0
+
+    # 映射表: 确保键名与Excel清洗后的名称一致
     mapping = {
-        "------人工工资支出": offline_data.get('wages', 0),
-        "------仓库房租支出": offline_data.get('rent', 0),
-        "------物业水电支出": offline_data.get('utilities', 0),
-        "------耗材成本支出": offline_data.get('consumables', 0),
-        "------其他费用": offline_data.get('others', 0) 
+        "------人工工资支出": get_v('wages'),
+        "------仓库房租支出": get_v('rent'),
+        "------物业水电支出": get_v('utilities'),
+        "------耗材成本支出": get_v('consumables'),
+        "------其他支出": get_v('others') # Excel中通常是"其他支出"
     }
     
     for k, v in mapping.items():
         if k in df['费项'].values: df.loc[df['费项']==k, current_month] = v
     
     total_offline = sum(mapping.values())
-    if "3、线下成本" in df['费项'].values: df.loc[df['费项']=="3、线下成本", current_month] = total_offline
     
+    # 查找并更新 "3、线下支出" 或 "3、线下成本"
+    target_row = "3、线下成本" if "3、线下成本" in df['费项'].values else "3、线下支出"
+    if target_row in df['费项'].values:
+        df.loc[df['费项']==target_row, current_month] = total_offline
+    
+    # 计算净利润
     try:
         def get_val(name, col):
             rows = df[df['费项'] == name]
@@ -555,7 +530,9 @@ def inject_offline_and_calculate(df: pd.DataFrame, offline_data: dict):
         for m in data_cols:
             v_online = get_val("1、线上毛利", m)
             v_hq = get_val("------总部分润（应收）", m)
-            v_off = total_offline if m == current_month else get_val("3、线下成本", m)
+            # 线下成本: 最新月用录入值(total_offline)，历史月用表里原本的值
+            v_off = total_offline if m == current_month else get_val(target_row, m)
+            
             if "净利润" in df['费项'].values:
                 df.loc[df['费项']=="净利润", m] = v_online - v_hq - v_off
     except: pass
@@ -591,25 +568,33 @@ def render_query_system(db_manager):
     store = st.session_state.store_info
     st.title(f"📊 {store['store_name']}")
     
-    # 线下成本 (垂直表单，无step)
+    # 线下成本录入 (UI优化：窄列、垂直、无步进、默认空白)
     if not st.session_state.get('cost_submitted', False):
         st.info("请录入本期线下成本（直接输入金额，无需加减号）：")
-        with st.form("cost_form"):
-            w = st.number_input("人工工资支出", min_value=0.0, format="%.2f")
-            r = st.number_input("仓库房租支出", min_value=0.0, format="%.2f")
-            u = st.number_input("物业水电支出", min_value=0.0, format="%.2f")
-            c = st.number_input("耗材成本支出", min_value=0.0, format="%.2f")
-            o = st.number_input("--其他费用", min_value=0.0, format="%.2f", help="输入金额将直接增加线下成本总额")
-            
-            if st.form_submit_button("提交并生成报表", type="primary"):
-                data = {"wages": w, "rent": r, "utilities": u, "consumables": c, "others": o}
-                st.session_state.offline_data = data
-                st.session_state.cost_submitted = True
+        
+        # 使用 col[0] 限制宽度为屏幕的 1/3 (1:2比例)
+        col_input, _ = st.columns([1, 2])
+        with col_input:
+            with st.form("cost_form"):
+                # value=None 使初始为空白
+                w = st.number_input("人工工资支出", min_value=0.0, value=None, step=None, format="%.2f")
+                r = st.number_input("仓库房租支出", min_value=0.0, value=None, step=None, format="%.2f")
+                u = st.number_input("物业水电支出", min_value=0.0, value=None, step=None, format="%.2f")
+                c = st.number_input("耗材成本支出", min_value=0.0, value=None, step=None, format="%.2f")
+                o = st.number_input("--其他费用", min_value=0.0, value=None, step=None, format="%.2f", help="输入金额将直接增加线下成本总额")
                 
-                reports = list(db['reports'].find({'store_id': store['_id']}).sort('report_month', -1))
-                latest_month = reports[0]['report_month'] if reports else datetime.now().strftime("%Y-%m")
-                db_manager.save_offline_cost(store['_id'], latest_month, data)
-                st.rerun()
+                if st.form_submit_button("提交并生成报表", type="primary"):
+                    data = {"wages": w, "rent": r, "utilities": u, "consumables": c, "others": o}
+                    st.session_state.offline_data = data
+                    st.session_state.cost_submitted = True
+                    
+                    reports = list(db['reports'].find({'store_id': store['_id']}).sort('report_month', -1))
+                    latest_month = reports[0]['report_month'] if reports else datetime.now().strftime("%Y-%m")
+                    
+                    # 存入前将None转为0
+                    save_data = {k: (v if v is not None else 0.0) for k, v in data.items()}
+                    db_manager.save_offline_cost(store['_id'], latest_month, save_data)
+                    st.rerun()
         return
 
     # 报表展示
@@ -623,7 +608,6 @@ def render_query_system(db_manager):
     headers = report.get('table_headers', [])
     df_full = rebuild_dataframe_with_headers(raw_data, headers)
     
-    # 智能拆分
     try:
         mid = len(df_full.columns) // 2
         df_profit = df_full.iloc[:, :mid].copy()
@@ -651,7 +635,6 @@ def render_query_system(db_manager):
         b64 = get_base64_of_bin_file(pdf)
         st.markdown(f'<a href="data:application/pdf;base64,{b64}" download="指引.pdf">📄 下载报表指引</a>', unsafe_allow_html=True)
 
-    # 看板
     try:
         fin = report.get('financial_data', {})
         recv = fin.get('receivables', {}).get('net_amount', 0)
@@ -745,28 +728,21 @@ def create_permission_app():
             if data:
                 out = io.BytesIO()
                 with pd.ExcelWriter(out, engine='xlsxwriter') as writer:
-                    # 扁平化数据
                     rows = []
                     for d in data:
                         r = {
-                            "门店ID": d['store_id'], 
-                            "月份": d['month'],
+                            "门店ID": d['store_id'], "月份": d['month'],
                             "提交时间": d.get('updated_at', ''),
-                            "工资": d['data'].get('wages', 0),
-                            "房租": d['data'].get('rent', 0),
-                            "水电": d['data'].get('utilities', 0),
-                            "耗材": d['data'].get('consumables', 0),
+                            "工资": d['data'].get('wages', 0), "房租": d['data'].get('rent', 0),
+                            "水电": d['data'].get('utilities', 0), "耗材": d['data'].get('consumables', 0),
                             "其他": d['data'].get('others', 0)
                         }
                         rows.append(r)
-                    
-                    # 按门店分sheet
                     df_all = pd.DataFrame(rows)
                     for sid in df_all['门店ID'].unique():
                         sub_df = df_all[df_all['门店ID'] == sid]
                         safe_name = str(sid)[:30].replace(':','').replace('/','')
                         sub_df.to_excel(writer, sheet_name=safe_name, index=False)
-                        
                 st.download_button("📥 下载Excel", out.getvalue(), "costs.xlsx")
             else: st.warning("无数据")
 
