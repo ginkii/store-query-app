@@ -1,10 +1,10 @@
-# streamlit_app.py - 门店报表系统 (全功能终极完整版)
+# streamlit_app.py - 门店报表系统 (格式化修复版)
 """
 包含所有模块：
 1. 门店查询：带双层表头、特定行变色、自动读取总部分润、线下成本录入(垂直无步进)。
 2. 批量上传：解析Excel、存入MongoDB。
 3. 权限管理：权限表导入、PDF管理、线下成本数据下载。
-4. 修复：数据库连接判断、缺少的方法。
+4. 修复：数据库连接判断、缺少的方法、数值格式化报错。
 """
 
 import streamlit as st
@@ -118,7 +118,6 @@ class DatabaseManager:
             self.db['offline_costs'].create_index([("store_id", 1), ("month", 1)], background=True)
         except Exception: pass
 
-    # === 补回丢失的方法 ===
     def get_database(self):
         return self.db
 
@@ -433,13 +432,26 @@ def add_meta_columns(df: pd.DataFrame) -> pd.DataFrame:
 def apply_advanced_style(df: pd.DataFrame):
     # 识别数值列
     numeric_cols = [c for c in df.columns if c[1] not in ['费项', '注释', '序号', ' ']]
-    format_dict = {c: "{:,.2f}" for c in numeric_cols}
-    # 序号列格式
+    
+    # 1. 定义安全格式化函数，避免ValueError
+    def safe_fmt(x):
+        try:
+            if pd.isna(x) or str(x).strip() == "": return "-"
+            return "{:,.2f}".format(float(x))
+        except:
+            return str(x)
+
+    format_dict = {c: safe_fmt for c in numeric_cols}
+    
+    # 2. 序号列格式
     seq_cols = [c for c in df.columns if c[1] == '序号']
     for c in seq_cols:
-        format_dict[c] = lambda x: f"{int(x)}" if pd.notnull(x) and x != "" else ""
+        def seq_fmt(x):
+            try: return f"{int(float(x))}"
+            except: return ""
+        format_dict[c] = seq_fmt
         
-    styler = df.style.format(format_dict, na_rep="-")
+    styler = df.style.format(format_dict)
 
     def row_style(row):
         try: item_name = str(row[0]).strip() 
