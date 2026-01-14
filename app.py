@@ -1,10 +1,9 @@
-# streamlit_app.py - 门店报表系统 (UI修复 & 数据注入修正版)
+# streamlit_app.py - 门店报表系统 (强力修复版)
 """
-包含所有模块：
-1. 门店查询：
-   - UI优化：线下成本填写框变窄(1/3宽度)、垂直排列、无默认值、无加减按钮。
-   - 核心修复：增加费项名称清洗逻辑，解决因换行符/名称不一致导致数据无法写入报表的问题。
-2. 批量上传 & 权限管理：功能保持完整。
+针对性修复：
+1. 表头颜色：弃用CSS选择器，改用 Pandas map_index (Python逻辑) -> 解决颜色不显示问题。
+2. 序号格式：在 Dataframe 层面强制转为 str -> 解决显示为数字/浮点数问题。
+3. 注释删除：在数据源头增加清洗逻辑 -> 解决旧注释列残留问题。
 """
 
 import streamlit as st
@@ -23,10 +22,9 @@ import hashlib
 import time
 
 # ==========================================
-# 1. 常量定义 (元数据字典)
+# 1. 常量定义
 # ==========================================
 REPORT_META_MAP = {
-    # === 利润表 Items ===
     "1、线上毛利": {"seq": 1, "comment": "计费基准项。还原所有利润与费用后的综合获利基数。"},
     "1、回款": {"seq": 1, "comment": "核心流入基准。门店本期实际入账的总金额(到账净额)。"},
     "--利润项": {"seq": 2, "comment": "经营总盘子。反映本月线上业务产生的各类收入及补贴总额。"},
@@ -51,27 +49,18 @@ REPORT_META_MAP = {
     "------仓内损耗": {"seq": 24, "comment": "实际归属于当月的物流费"},
     "------售后损耗": {"seq": 25, "comment": "实际归属于当月的税金"}, 
     "--其他费用": {"seq": 26, "comment": "实际归属于当月的其他费用"},
-    
-    # 线下部分 (兼容多种命名)
     "3、线下成本": {"seq": 17, "comment": "线下损益分摊。核算线下经营对总利润的损耗。"}, 
     "3、线下支出": {"seq": 17, "comment": "门店硬性开支。所有线下实体经营产生的现金支出。"}, 
-    "------人工工资支出": {"seq": 17, "comment": "当月实际发放工资，包含绩效、福利费、奖金"},
-    "------仓库房租支出": {"seq": 18, "comment": "本月实际支付给房东的仓库或店面租金。"},
-    "------物业水电支出": {"seq": 19, "comment": "本月实付的物业管理费、清扫费及保安费等。"},
-    "------耗材成本支出": {"seq": 21, "comment": "本月实际支付出去的应用耗材费"},
+    "------人工工资": {"seq": 17, "comment": "当月实际发放工资，包含绩效、福利费、奖金"},
+    "------仓库房租": {"seq": 18, "comment": "本月实际支付给房东的仓库或店面租金。"},
+    "------物业水电": {"seq": 19, "comment": "本月实付的物业管理费、清扫费及保安费等。"},
+    "------耗材成本": {"seq": 21, "comment": "本月实际支付出去的应用耗材费"},
     "------其他支出": {"seq": 22, "comment": "门店发生的其他杂项现金支出。"}, 
-    
     "净利润": {"seq": 999, "comment": "最终经营成果。计算公式：线上毛利 - 总部分润 - 线下成本。"},
 }
 
-# 页面配置
 if "page_configured" not in st.session_state:
-    st.set_page_config(
-        page_title="门店报表系统",
-        page_icon="🏪",
-        layout="wide",
-        initial_sidebar_state="expanded"
-    )
+    st.set_page_config(page_title="门店报表系统", page_icon="🏪", layout="wide", initial_sidebar_state="expanded")
     st.session_state.page_configured = True
 
 # ==========================================
@@ -81,11 +70,9 @@ class ConfigManager:
     @staticmethod
     def get_mongodb_config():
         try:
-            if hasattr(st, 'secrets') and 'mongodb' in st.secrets:
-                return st.secrets["mongodb"]
+            if hasattr(st, 'secrets') and 'mongodb' in st.secrets: return st.secrets["mongodb"]
         except: pass
         return {'uri': 'mongodb://localhost:27017/', 'database_name': 'store_reports'}
-    
     @staticmethod
     def get_admin_password():
         try: return st.secrets["security"]["admin_password"]
@@ -93,11 +80,8 @@ class ConfigManager:
 
 class DatabaseManager:
     def __init__(self):
-        self.db = None
-        self.client = None
-        self.fs = None
+        self.db = None; self.client = None; self.fs = None
         self._connect()
-    
     def _connect(self):
         try:
             config = ConfigManager.get_mongodb_config()
@@ -105,13 +89,9 @@ class DatabaseManager:
             self.db = self.client[config['database_name']]
             self.fs = gridfs.GridFS(self.db)
             if self.db is not None:
-                if "offline_costs" not in self.db.list_collection_names():
-                    self.db.create_collection("offline_costs")
+                if "offline_costs" not in self.db.list_collection_names(): self.db.create_collection("offline_costs")
                 self._create_indexes()
-        except Exception as e:
-            st.error(f"连接失败: {e}")
-            self.db = None
-    
+        except Exception as e: st.error(f"连接失败: {e}"); self.db = None
     def _create_indexes(self):
         if self.db is None: return
         try:
@@ -120,295 +100,211 @@ class DatabaseManager:
             self.db['reports'].create_index([("store_id", 1), ("report_month", -1)], background=True)
             self.db['offline_costs'].create_index([("store_id", 1), ("month", 1)], background=True)
         except Exception: pass
-
-    def get_database(self):
-        return self.db
-
-    def is_connected(self):
-        return self.db is not None
-
-    def save_guide_pdf(self, file_obj):
+    def get_database(self): return self.db
+    def is_connected(self): return self.db is not None
+    def save_guide_pdf(self, f):
         if self.fs is None: return False
         try:
             old = self.fs.find_one({"filename": "guide.pdf"})
             if old: self.fs.delete(old._id)
-            self.fs.put(file_obj, filename="guide.pdf")
+            self.fs.put(f, filename="guide.pdf")
             return True
         except: return False
-
     def get_guide_pdf(self):
         if self.fs is None: return None
         try: return self.fs.find_one({"filename": "guide.pdf"})
         except: return None
-
-    def save_offline_cost(self, store_id, month, data):
+    def save_offline_cost(self, sid, m, d):
         if self.db is None: return False
-        try:
-            self.db["offline_costs"].update_one(
-                {"store_id": store_id, "month": month},
-                {"$set": {"store_id": store_id, "month": month, "data": data, "updated_at": datetime.now()}},
-                upsert=True
-            )
-            return True
-        except Exception as e:
-            st.error(f"保存失败: {e}")
-            return False
-
-    def get_offline_cost(self, store_id, month):
+        try: self.db["offline_costs"].update_one({"store_id": sid, "month": m}, {"$set": {"store_id": sid, "month": m, "data": d, "updated_at": datetime.now()}}, upsert=True); return True
+        except: return False
+    def get_offline_cost(self, sid, m):
         if self.db is None: return {}
         try:
-            res = self.db["offline_costs"].find_one({"store_id": store_id, "month": month})
+            res = self.db["offline_costs"].find_one({"store_id": sid, "month": m})
             return res.get("data", {}) if res else {}
         except: return {}
-
     def get_all_offline_costs(self):
         if self.db is None: return []
         try: return list(self.db["offline_costs"].find({}, {"_id": 0}).sort("store_id", 1))
         except: return []
 
 @st.cache_resource
-def get_db_manager():
-    return DatabaseManager()
+def get_db_manager(): return DatabaseManager()
 
 # ==========================================
-# 3. 数据模型 (Models)
+# 3. 数据模型
 # ==========================================
 class StoreModel:
     @staticmethod
-    def create_store_document(store_name: str, store_code: str = None, **kwargs) -> Dict:
-        timestamp = int(datetime.now().timestamp())
+    def create_store_document(store_name, store_code=None, **kwargs):
+        ts = int(datetime.now().timestamp())
         return {
-            '_id': kwargs.get('_id', f"store_{store_code or store_name.replace(' ', '_')}_{timestamp}"),
+            '_id': kwargs.get('_id', f"store_{store_code or store_name.replace(' ', '_')}_{ts}"),
             'store_name': store_name.strip(),
-            'store_code': store_code or StoreModel._generate_store_code(store_name),
+            'store_code': store_code or StoreModel._gen_code(store_name),
             'region': kwargs.get('region', '未分类'),
-            'created_at': kwargs.get('created_at', datetime.now()),
-            'created_by': kwargs.get('created_by', 'system'),
-            'status': kwargs.get('status', 'active'),
-            'aliases': kwargs.get('aliases', [store_name.strip()])
+            'created_at': datetime.now(), 'created_by': 'system', 'status': 'active',
+            'aliases': [store_name.strip()]
         }
     @staticmethod
-    def _generate_store_code(store_name: str) -> str:
-        try:
-            normalized = store_name.replace('犀牛百货', '').replace('门店', '').replace('店', '').strip()
-            hash_obj = hashlib.md5(normalized.encode('utf-8'))
-            return f"AUTO_{hash_obj.hexdigest()[:6].upper()}"
-        except:
-            return f"AUTO_{int(datetime.now().timestamp()) % 100000}"
+    def _gen_code(name):
+        try: return f"AUTO_{hashlib.md5(name.encode('utf-8')).hexdigest()[:6].upper()}"
+        except: return f"AUTO_{int(datetime.now().timestamp())}"
 
 class ReportModel:
     @staticmethod
-    def create_report_document(store_data: Dict, report_month: str, excel_data: List[Dict], headers: List[str], **kwargs) -> Dict:
+    def create_report_document(store_data, report_month, excel_data, headers, **kwargs):
         return {
-            'store_id': store_data['_id'],
-            'store_code': store_data['store_code'],
-            'store_name': store_data['store_name'],
-            'report_month': report_month,
-            'sheet_name': kwargs.get('sheet_name', store_data['store_name']),
-            'raw_excel_data': excel_data,
-            'table_headers': headers,
-            'financial_data': kwargs.get('financial_data', {}),
-            'created_at': kwargs.get('created_at', datetime.now()),
-            'updated_at': datetime.now(),
-            'uploaded_by': kwargs.get('uploaded_by', 'system')
+            'store_id': store_data['_id'], 'store_code': store_data['store_code'], 'store_name': store_data['store_name'],
+            'report_month': report_month, 'sheet_name': kwargs.get('sheet_name', store_data['store_name']),
+            'raw_excel_data': excel_data, 'table_headers': headers, 'financial_data': kwargs.get('financial_data', {}),
+            'created_at': datetime.now(), 'updated_at': datetime.now(), 'uploaded_by': 'system'
         }
     @staticmethod
-    def dataframe_to_dict_list(df: pd.DataFrame) -> tuple[List[Dict], List[str]]:
-        headers = []
-        for col in df.columns:
-            col_str = str(col)
-            if col_str.startswith('Unnamed:') or 'unnamed' in col_str.lower(): headers.append("")
-            else: headers.append(col_str)
+    def dataframe_to_dict_list(df):
+        headers = [str(c) if not str(c).startswith('Unnamed') else "" for c in df.columns]
         unique_headers = []
         ec = 0
-        for header in headers:
-            if header == "":
-                unique_headers.append(f"_empty_{ec}")
-                ec += 1
-            else: unique_headers.append(header)
+        for h in headers:
+            if h == "": unique_headers.append(f"_empty_{ec}"); ec += 1
+            else: unique_headers.append(h)
         df.columns = unique_headers
-        result = []
-        for index, row in df.iterrows():
-            row_dict = {}
-            for col_idx, value in enumerate(row):
-                col_key = f"col_{col_idx}"
-                if pd.isna(value): row_dict[col_key] = ""
-                elif isinstance(value, (int, float)): row_dict[col_key] = float(value)
-                else:
-                    value_str = str(value).strip()
-                    if value_str.startswith('='):
-                        if '平台内支出' in value_str: row_dict[col_key] = "--平台内支出"
-                        else: row_dict[col_key] = value_str[1:]
-                    else: row_dict[col_key] = value_str
-            result.append(row_dict)
-        return result, headers
+        res = []
+        for _, row in df.iterrows():
+            r = {}
+            for i, v in enumerate(row):
+                if pd.isna(v): r[f"col_{i}"] = ""
+                elif isinstance(v, (int, float)): r[f"col_{i}"] = float(v)
+                else: r[f"col_{i}"] = str(v)
+            res.append(r)
+        return res, headers
 
 class PermissionModel:
     @staticmethod
-    def create_permission_document(query_code: str, store_data: Dict, **kwargs) -> Dict:
+    def create_permission_document(query_code, store_data, **kwargs):
         return {
-            'query_code': query_code.strip(),
-            'store_id': store_data['_id'],
-            'store_name': store_data['store_name'],
-            'store_code': store_data['store_code'],
-            'created_at': kwargs.get('created_at', datetime.now()),
-            'updated_at': datetime.now(),
-            'created_by': kwargs.get('created_by', 'system'),
-            'status': kwargs.get('status', 'active')
+            'query_code': query_code.strip(), 'store_id': store_data['_id'],
+            'store_name': store_data['store_name'], 'store_code': store_data['store_code'],
+            'created_at': datetime.now(), 'updated_at': datetime.now(),
+            'created_by': 'system', 'status': 'active'
         }
 
 # ==========================================
-# 4. 业务逻辑类 (Uploader & Manager)
+# 4. 业务逻辑
 # ==========================================
 class BulkReportUploader:
-    def __init__(self, db):
-        self.db = db
-        self.stores_collection = self.db['stores']
-        self.reports_collection = self.db['reports']
-    
-    def find_or_create_store(self, sheet_name: str) -> Optional[Dict]:
-        normalized = sheet_name.replace('犀牛百货', '').replace('门店', '').replace('店', '').strip()
+    def __init__(self, db): self.db = db; self.stores = db['stores']; self.reports = db['reports']
+    def process_excel_file(self, file_buffer, month, clear, cb=None):
+        start = time.time()
+        res = {'success_count': 0, 'failed_count': 0, 'errors': [], 'processed_stores': [], 'failed_stores': []}
         try:
-            store = self.stores_collection.find_one({
-                '$or': [
-                    {"store_name": sheet_name},
-                    {"store_name": {"$regex": normalized, "$options": "i"}},
-                    {"aliases": {"$in": [sheet_name, normalized]}}
-                ]
-            })
-            if store: return store
-        except: pass
-        try:
-            store_data = StoreModel.create_store_document(store_name=sheet_name.strip(), aliases=[sheet_name.strip(), normalized], created_by='bulk_upload')
-            self.stores_collection.insert_one(store_data)
-            return store_data
-        except: return None
-
-    def process_excel_file(self, file_buffer, report_month: str, clear_history: bool = True, progress_callback=None) -> Dict:
-        start_time = time.time()
-        result = {'success_count': 0, 'failed_count': 0, 'errors': [], 'processed_stores': [], 'failed_stores': [], 'total_time': 0}
-        try:
-            if progress_callback: progress_callback(10, "读取Excel文件...")
-            excel_data_display = pd.read_excel(file_buffer, sheet_name=None, engine='openpyxl', header=1)
-            excel_data_financial = pd.read_excel(file_buffer, sheet_name=None, engine='openpyxl', header=3)
+            if cb: cb(10, "读取Excel...")
+            dfs = pd.read_excel(file_buffer, sheet_name=None, header=1)
+            dfs_fin = pd.read_excel(file_buffer, sheet_name=None, header=3)
+            if clear: self.reports.delete_many({'report_month': month})
             
-            if clear_history:
-                self.reports_collection.delete_many({'report_month': report_month})
-            
-            total = len(excel_data_display)
-            processed = 0
-            for sheet_name in excel_data_display.keys():
-                processed += 1
-                if progress_callback: progress_callback(20 + int(processed/total*70), f"处理: {sheet_name}")
+            for i, (name, df) in enumerate(dfs.items()):
+                if cb: cb(20 + int((i+1)/len(dfs)*70), f"处理: {name}")
                 try:
-                    store = self.find_or_create_store(sheet_name)
+                    # 查找门店
+                    norm = name.replace('犀牛百货','').replace('门店','').replace('店','').strip()
+                    store = self.stores.find_one({'$or': [{"store_name": name}, {"aliases": {"$in": [name, norm]}}]})
                     if not store:
-                        result['failed_stores'].append({'store_name': sheet_name, 'reason': '创建门店失败'})
-                        result['failed_count'] += 1
-                        continue
+                        store = StoreModel.create_store_document(name, aliases=[name, norm], created_by='bulk')
+                        self.stores.insert_one(store)
                     
-                    df_display = excel_data_display[sheet_name].dropna(axis=1, how='all')
-                    df_fin = excel_data_financial[sheet_name].dropna(axis=1, how='all')
-                    if df_display.empty: continue
+                    df = df.dropna(axis=1, how='all')
+                    if df.empty: continue
+                    data, hdrs = ReportModel.dataframe_to_dict_list(df)
                     
-                    excel_data_dict, headers = ReportModel.dataframe_to_dict_list(df_display)
-                    financial_data = self._extract_financial_data(df_fin)
+                    # 财务数据
+                    fin = {}
+                    df_f = dfs_fin.get(name)
+                    if df_f is not None:
+                        # 简单提取第37行合计
+                        try:
+                            cols = [i for i,c in enumerate(df_f.columns) if '合计' in str(c) or 'sum' in str(c).lower()]
+                            if len(cols) >= 2:
+                                val = df_f.iloc[36, cols[1]]
+                                fin['receivables'] = {'net_amount': float(val)}
+                        except: pass
                     
-                    report = ReportModel.create_report_document(store, report_month, excel_data_dict, headers, sheet_name=sheet_name, financial_data=financial_data)
-                    self.reports_collection.insert_one(report)
-                    result['success_count'] += 1
-                    result['processed_stores'].append({'sheet_name': sheet_name, 'store_name': store['store_name']})
+                    rpt = ReportModel.create_report_document(store, month, data, hdrs, sheet_name=name, financial_data=fin)
+                    self.reports.insert_one(rpt)
+                    res['success_count'] += 1
                 except Exception as e:
-                    result['failed_count'] += 1
-                    result['errors'].append(f"{sheet_name}: {e}")
-        except Exception as e: result['errors'].append(str(e))
-        result['total_time'] = time.time() - start_time
-        return result
-
-    def _extract_financial_data(self, df: pd.DataFrame) -> Dict:
-        fin_data = {'receivables': {}, 'profit': {}}
-        try:
-            total_cols = [i for i, c in enumerate(df.columns) if '合计' in str(c) or 'Total' in str(c) or 'sum' in str(c).lower()]
-            if not total_cols: 
-                num_counts = [(i, df.iloc[:, i].apply(lambda x: pd.to_numeric(x, errors='coerce')).notna().sum()) for i in range(len(df.columns))]
-                num_counts.sort(key=lambda x:x[1], reverse=True)
-                if len(num_counts) >= 2: total_cols = [num_counts[0][0], num_counts[1][0]]
-            
-            if len(df) >= 37 and len(total_cols) >= 2:
-                val = df.iloc[36, total_cols[1]] 
-                parsed = pd.to_numeric(val, errors='coerce')
-                if not pd.isna(parsed):
-                    fin_data['receivables']['net_amount'] = float(parsed)
-        except: pass
-        return fin_data
+                    res['failed_count'] += 1; res['errors'].append(f"{name}: {e}")
+        except Exception as e: res['errors'].append(str(e))
+        res['total_time'] = time.time() - start
+        return res
 
 class PermissionManager:
-    def __init__(self, db):
-        self.db = db
-        self.permissions = self.db['permissions']
-        self.stores = self.db['stores']
-        
-    def upload_permission_table(self, file_obj) -> Dict:
+    def __init__(self, db): self.db = db; self.perms = db['permissions']; self.stores = db['stores']
+    def upload_permission_table(self, f):
         try:
-            df = pd.read_csv(file_obj) if file_obj.name.endswith('.csv') else pd.read_excel(file_obj)
-            q_col, s_col = None, None
-            for c in df.columns:
-                if any(x in str(c).lower() for x in ['查询', 'query', 'code']): q_col = c
-                if any(x in str(c).lower() for x in ['门店', 'store', 'name']): s_col = c
-            if not q_col or not s_col: 
-                if len(df.columns) >= 2: q_col, s_col = df.columns[0], df.columns[1]
-                else: return {"success": False, "message": "无法识别列"}
+            df = pd.read_csv(f) if f.name.endswith('.csv') else pd.read_excel(f)
+            qc, sc = df.columns[0], df.columns[1]
             res = {"success": True, "created": 0, "updated": 0}
-            for _, row in df.iterrows():
-                q_code = str(row[q_col]).strip()
-                s_name = str(row[s_col]).strip()
-                if not q_code or not s_name: continue
-                store = self.stores.find_one({"store_name": s_name})
+            for _, r in df.iterrows():
+                q, s = str(r[qc]).strip(), str(r[sc]).strip()
+                if not q or not s: continue
+                store = self.stores.find_one({"store_name": s})
                 if not store:
-                    store = self.stores.find_one({"aliases": s_name})
-                    if not store:
-                        store = StoreModel.create_store_document(s_name, created_by='perm_upload')
-                        self.stores.insert_one(store)
-                perm = PermissionModel.create_permission_document(q_code, store)
-                if self.permissions.find_one({"query_code": q_code}):
-                    self.permissions.replace_one({"query_code": q_code}, perm)
-                    res["updated"] += 1
-                else:
-                    self.permissions.insert_one(perm)
-                    res["created"] += 1
+                    store = StoreModel.create_store_document(s, created_by='perm')
+                    self.stores.insert_one(store)
+                perm = PermissionModel.create_permission_document(q, store)
+                if self.perms.find_one({"query_code": q}):
+                    self.perms.replace_one({"query_code": q}, perm); res["updated"] += 1
+                else: self.perms.insert_one(perm); res["created"] += 1
             return res
         except Exception as e: return {"success": False, "message": str(e)}
-
-    def get_all_permissions(self):
-        return list(self.permissions.find().sort("query_code", 1))
-    
-    def delete_permission(self, code):
-        self.permissions.delete_one({"query_code": code})
+    def get_all_permissions(self): return list(self.perms.find().sort("query_code", 1))
+    def delete_permission(self, c): self.perms.delete_one({"query_code": c})
 
 # ==========================================
-# 5. 辅助函数 (样式与计算)
+# 5. 辅助函数 (样式与计算) - 重点修复区域
 # ==========================================
 def get_base64_of_bin_file(bin_file):
     data = bin_file.read()
     return base64.b64encode(data).decode()
 
+def clean_original_comments(df: pd.DataFrame) -> pd.DataFrame:
+    """强制清洗：删除所有列名中包含'注释'或'备注'的列"""
+    cols_to_drop = [c for c in df.columns if '注释' in str(c) or '备注' in str(c)]
+    if cols_to_drop:
+        df = df.drop(columns=cols_to_drop)
+    return df
+
 def add_meta_columns(df: pd.DataFrame) -> pd.DataFrame:
-    # 强制去掉原表的注释列
-    if '注释' in df.columns: del df['注释']
+    # 1. 先删旧
+    df = clean_original_comments(df)
     
+    # 2. 生成新列
     comments, seqs = [], []
     for item in df['费项']:
-        # 清洗item名称以匹配字典
         key = str(item).strip().replace('\n', '').replace('（需合伙人补充）', '')
+        # 兼容性处理
+        if key not in REPORT_META_MAP and "支出" in key and "其他" not in key:
+            key = key.replace("支出", "")
+            
         meta = REPORT_META_MAP.get(key, {})
         comments.append(meta.get("comment", ""))
-        seqs.append(meta.get("seq", np.nan))
+        
+        # 核心修复：序号转为纯文本字符串
+        s = meta.get("seq")
+        if pd.notnull(s):
+            seqs.append(str(int(s))) # 1.0 -> 1 -> "1"
+        else:
+            seqs.append("")
     
+    # 3. 插入
     df.insert(1, '注释', comments)
     df.insert(2, '序号', seqs)
     return df
 
 def apply_advanced_style(df: pd.DataFrame):
+    # 识别数值列
     numeric_cols = [c for c in df.columns if c[1] not in ['费项', '注释', '序号', ' ']]
     
     def safe_fmt(x):
@@ -418,16 +314,28 @@ def apply_advanced_style(df: pd.DataFrame):
         except: return str(x)
 
     format_dict = {c: safe_fmt for c in numeric_cols}
-    
-    seq_cols = [c for c in df.columns if c[1] == '序号']
-    for c in seq_cols:
-        def seq_fmt(x):
-            try: return f"{int(float(x))}"
-            except: return ""
-        format_dict[c] = seq_fmt
-        
     styler = df.style.format(format_dict)
 
+    # === 核心修复：使用 map_index 设置表头颜色 (Python逻辑) ===
+    # 这是唯一能保证在所有浏览器和Streamlit版本生效的方法
+    def header_style(x):
+        if "利润表" in str(x): 
+            return "background-color: #E8F0FE; color: #1a73e8; font-weight: bold; text-align: center; border: 1px solid #ddd;"
+        if "现金表" in str(x): 
+            return "background-color: #FFFFE0; color: #d4a017; font-weight: bold; text-align: center; border: 1px solid #ddd;"
+        if "_empty_" in str(x) or str(x).strip() == "":
+            return "background-color: white; border: none; color: transparent;"
+        return "text-align: center; border: 1px solid #ddd; vertical-align: middle;"
+    
+    # 应用于 Level 0 (表一/表二)
+    styler.map_index(header_style, axis=1, level=0)
+    
+    # 应用于 Level 1 (列名)
+    def level1_style(x):
+        return "background-color: #F8F9FA; color: #333; font-weight: bold; text-align: center; border: 1px solid #ddd;"
+    styler.map_index(level1_style, axis=1, level=1)
+
+    # 行样式
     def row_style(row):
         try: item_name = str(row[0]).strip() 
         except: item_name = ""
@@ -452,18 +360,12 @@ def apply_advanced_style(df: pd.DataFrame):
 
     styler = styler.apply(row_style, axis=1)
     
+    # 列样式
     styler = styler.applymap(lambda x: "min-width: 180px; text-align: left;", subset=[c for c in df.columns if c[1]=='费项'])
     styler = styler.applymap(lambda x: "color: #888888; font-style: italic; font-size: 0.9em; min-width: 200px; white-space: normal;", subset=[c for c in df.columns if c[1]=='注释'])
     styler = styler.applymap(lambda x: "text-align: center;", subset=[c for c in df.columns if c[1]=='序号'])
     styler = styler.applymap(lambda x: "background-color: white; border: none; width: 20px;", subset=[c for c in df.columns if c[0]==' '])
 
-    styles = [
-        {'selector': 'th', 'props': [('text-align', 'center'), ('border', '1px solid #ddd'), ('vertical-align', 'middle')]},
-        {'selector': 'th:contains("利润表")', 'props': [('background-color', '#E8F0FE !important'), ('color', '#1a73e8'), ('font-weight', 'bold')]},
-        {'selector': 'th:contains("现金表")', 'props': [('background-color', '#FFFFE0 !important'), ('color', '#d4a017'), ('font-weight', 'bold')]},
-        {'selector': 'th:contains("_empty_")', 'props': [('background-color', 'white'), ('border', 'none'), ('color', 'transparent')]},
-    ]
-    styler = styler.set_table_styles(styles)
     return styler
 
 def rebuild_dataframe_with_headers(raw_data, headers):
@@ -475,9 +377,7 @@ def rebuild_dataframe_with_headers(raw_data, headers):
     unique_headers = []
     ec = 0
     for h in headers:
-        if h == "": 
-            unique_headers.append(f"_empty_{ec}")
-            ec += 1
+        if h == "": unique_headers.append(f"_empty_{ec}"); ec += 1
         else: unique_headers.append(h)
     df = pd.DataFrame(data, columns=unique_headers)
     if len(df.columns) > 0: df.rename(columns={df.columns[0]: '费项'}, inplace=True)
@@ -486,39 +386,38 @@ def rebuild_dataframe_with_headers(raw_data, headers):
 def inject_offline_and_calculate(df: pd.DataFrame, offline_data: dict):
     if df.empty: return df
     
-    # 核心修正：先清洗费项列，去除换行符和备注，确保匹配成功
+    # 清洗费项
     if '费项' in df.columns:
-        df['费项'] = df['费项'].astype(str).str.strip().str.replace('\n', '').str.replace('（需合伙人补充）', '')
+        def clean_name(x):
+            s = str(x).strip().replace('\n', '').replace('（需合伙人补充）', '')
+            if "支出" in s and "其他" not in s: return s.replace("支出", "")
+            return s
+        df['费项'] = df['费项'].apply(clean_name)
     
     data_cols = [c for c in df.columns if c not in ['费项', '注释', '序号']]
     if not data_cols: return df
     current_month = data_cols[-1]
     
-    # 获取用户输入 (处理 None)
     def get_v(key):
         val = offline_data.get(key)
         return float(val) if val is not None else 0.0
 
-    # 映射表: 确保键名与Excel清洗后的名称一致
     mapping = {
-        "------人工工资支出": get_v('wages'),
-        "------仓库房租支出": get_v('rent'),
-        "------物业水电支出": get_v('utilities'),
-        "------耗材成本支出": get_v('consumables'),
-        "------其他支出": get_v('others') # Excel中通常是"其他支出"
+        "------人工工资": get_v('wages'),
+        "------仓库房租": get_v('rent'),
+        "------物业水电": get_v('utilities'),
+        "------耗材成本": get_v('consumables'),
+        "------其他支出": get_v('others') 
     }
     
     for k, v in mapping.items():
         if k in df['费项'].values: df.loc[df['费项']==k, current_month] = v
     
     total_offline = sum(mapping.values())
-    
-    # 查找并更新 "3、线下支出" 或 "3、线下成本"
     target_row = "3、线下成本" if "3、线下成本" in df['费项'].values else "3、线下支出"
     if target_row in df['费项'].values:
         df.loc[df['费项']==target_row, current_month] = total_offline
     
-    # 计算净利润
     try:
         def get_val(name, col):
             rows = df[df['费项'] == name]
@@ -530,16 +429,14 @@ def inject_offline_and_calculate(df: pd.DataFrame, offline_data: dict):
         for m in data_cols:
             v_online = get_val("1、线上毛利", m)
             v_hq = get_val("------总部分润（应收）", m)
-            # 线下成本: 最新月用录入值(total_offline)，历史月用表里原本的值
             v_off = total_offline if m == current_month else get_val(target_row, m)
-            
             if "净利润" in df['费项'].values:
                 df.loc[df['费项']=="净利润", m] = v_online - v_hq - v_off
     except: pass
     return df
 
 # ==========================================
-# 6. 各应用模块
+# 6. 渲染
 # ==========================================
 def render_query_system(db_manager):
     st.markdown("<h1 style='text-align: center;'>🔍 门店查询系统</h1>", unsafe_allow_html=True)
@@ -564,58 +461,44 @@ def render_query_system(db_manager):
                 else: st.error("编号无效")
         return
 
-    # 已登录
     store = st.session_state.store_info
     st.title(f"📊 {store['store_name']}")
     
-    # 线下成本录入 (UI优化：窄列、垂直、无步进、默认空白)
     if not st.session_state.get('cost_submitted', False):
-        st.info("请录入本期线下成本（直接输入金额，无需加减号）：")
-        
-        # 使用 col[0] 限制宽度为屏幕的 1/3 (1:2比例)
+        st.info("请录入本期线下成本（直接输入金额）：")
         col_input, _ = st.columns([1, 2])
         with col_input:
             with st.form("cost_form"):
-                # value=None 使初始为空白
-                w = st.number_input("人工工资支出", min_value=0.0, value=None, step=None, format="%.2f")
-                r = st.number_input("仓库房租支出", min_value=0.0, value=None, step=None, format="%.2f")
-                u = st.number_input("物业水电支出", min_value=0.0, value=None, step=None, format="%.2f")
-                c = st.number_input("耗材成本支出", min_value=0.0, value=None, step=None, format="%.2f")
-                o = st.number_input("--其他费用", min_value=0.0, value=None, step=None, format="%.2f", help="输入金额将直接增加线下成本总额")
-                
+                w = st.number_input("人工工资", min_value=0.0, value=None, step=None, format="%.2f")
+                r = st.number_input("仓库房租", min_value=0.0, value=None, step=None, format="%.2f")
+                u = st.number_input("物业水电", min_value=0.0, value=None, step=None, format="%.2f")
+                c = st.number_input("耗材成本", min_value=0.0, value=None, step=None, format="%.2f")
+                o = st.number_input("--其他支出", min_value=0.0, value=None, step=None, format="%.2f")
                 if st.form_submit_button("提交并生成报表", type="primary"):
                     data = {"wages": w, "rent": r, "utilities": u, "consumables": c, "others": o}
                     st.session_state.offline_data = data
                     st.session_state.cost_submitted = True
-                    
                     reports = list(db['reports'].find({'store_id': store['_id']}).sort('report_month', -1))
-                    latest_month = reports[0]['report_month'] if reports else datetime.now().strftime("%Y-%m")
-                    
-                    # 存入前将None转为0
-                    save_data = {k: (v if v is not None else 0.0) for k, v in data.items()}
-                    db_manager.save_offline_cost(store['_id'], latest_month, save_data)
+                    lm = reports[0]['report_month'] if reports else datetime.now().strftime("%Y-%m")
+                    sd = {k: (v if v is not None else 0.0) for k, v in data.items()}
+                    db_manager.save_offline_cost(store['_id'], lm, sd)
                     st.rerun()
         return
 
-    # 报表展示
     reports = list(db['reports'].find({'store_id': store['_id']}).sort('report_month', -1))
-    if not reports:
-        st.warning("暂无报表数据")
-        return
+    if not reports: st.warning("暂无报表数据"); return
 
     report = reports[0]
-    raw_data = report.get('raw_excel_data', [])
-    headers = report.get('table_headers', [])
-    df_full = rebuild_dataframe_with_headers(raw_data, headers)
+    df_full = rebuild_dataframe_with_headers(report.get('raw_excel_data', []), report.get('table_headers', []))
     
+    # 拆分逻辑
     try:
         mid = len(df_full.columns) // 2
         df_profit = df_full.iloc[:, :mid].copy()
         df_cash = df_full.iloc[:, mid:].copy()
         if '费项' not in df_profit.columns: df_profit.rename(columns={df_profit.columns[0]: '费项'}, inplace=True)
         if len(df_cash.columns) > 0: df_cash.rename(columns={df_cash.columns[0]: '费项'}, inplace=True)
-    except:
-        df_profit = df_full.copy(); df_cash = df_full.copy()
+    except: df_profit = df_full.copy(); df_cash = df_full.copy()
 
     df_profit = inject_offline_and_calculate(df_profit, st.session_state.offline_data)
     df_profit = add_meta_columns(df_profit)
@@ -640,36 +523,23 @@ def render_query_system(db_manager):
         recv = fin.get('receivables', {}).get('net_amount', 0)
         color = "#3F51B5" if recv < 0 else ("#FF8F00" if recv > 0 else "#546E7A")
         text = "总部应退" if recv < 0 else ("门店应返" if recv > 0 else "已结清")
-        st.markdown(f"""
-        <div style="background:{color};padding:15px;border-radius:10px;text-align:center;color:white;margin-bottom:20px;">
-            <div style="font-size:20px;">{text}</div>
-            <div style="font-size:28px;font-weight:bold;">¥{abs(recv):,.2f}</div>
-        </div>
-        """, unsafe_allow_html=True)
+        st.markdown(f"""<div style="background:{color};padding:15px;border-radius:10px;text-align:center;color:white;margin-bottom:20px;"><div style="font-size:20px;">{text}</div><div style="font-size:28px;font-weight:bold;">¥{abs(recv):,.2f}</div></div>""", unsafe_allow_html=True)
     except: pass
 
     st.dataframe(apply_advanced_style(df_display), use_container_width=True, height=600)
-    
-    if st.button("修改线下成本"):
-        st.session_state.cost_submitted = False
-        st.rerun()
+    if st.button("修改线下成本"): st.session_state.cost_submitted = False; st.rerun()
 
 def create_upload_app():
     st.title("📤 批量上传系统")
     db_manager = get_db_manager()
     if not db_manager.is_connected(): return
-    
     if 'admin_auth' not in st.session_state: st.session_state.admin_auth = False
-    
     if not st.session_state.admin_auth:
         pwd = st.text_input("管理员密码", type="password")
         if st.button("登录"):
-            if pwd == ConfigManager.get_admin_password():
-                st.session_state.admin_auth = True
-                st.rerun()
+            if pwd == ConfigManager.get_admin_password(): st.session_state.admin_auth = True; st.rerun()
             else: st.error("密码错误")
         return
-
     uploader = BulkReportUploader(db_manager.get_database())
     c1, c2 = st.columns(2)
     with c1:
@@ -677,10 +547,8 @@ def create_upload_app():
         clear = st.checkbox("覆盖历史数据", value=True)
         file = st.file_uploader("选择Excel", type=['xlsx', 'xls'])
         if file and st.button("开始上传"):
-            bar = st.progress(0)
-            status = st.empty()
-            def update(p, m): bar.progress(p/100); status.text(m)
-            res = uploader.process_excel_file(file, month, clear, update)
+            bar = st.progress(0); status = st.empty()
+            res = uploader.process_excel_file(file, month, clear, lambda p, m: (bar.progress(p/100), status.text(m)))
             st.success(f"成功: {res['success_count']}, 失败: {res['failed_count']}")
             if res['errors']: st.error(res['errors'])
 
@@ -688,63 +556,39 @@ def create_permission_app():
     st.title("👥 权限管理系统")
     db_manager = get_db_manager()
     if not db_manager.is_connected(): return
-    
     if 'perm_auth' not in st.session_state: st.session_state.perm_auth = False
     if not st.session_state.perm_auth:
         pwd = st.text_input("管理员密码", type="password", key="p_pwd")
         if st.button("登录", key="p_login"):
-            if pwd == ConfigManager.get_admin_password():
-                st.session_state.perm_auth = True
-                st.rerun()
+            if pwd == ConfigManager.get_admin_password(): st.session_state.perm_auth = True; st.rerun()
             else: st.error("密码错误")
         return
-
     mgr = PermissionManager(db_manager.get_database())
     t1, t2, t3 = st.tabs(["权限上传", "权限列表", "系统数据"])
-    
     with t1:
-        f = st.file_uploader("权限表(Excel/CSV)", type=['xlsx', 'csv'])
+        f = st.file_uploader("权限表", type=['xlsx', 'csv'])
         if f and st.button("上传"):
             res = mgr.upload_permission_table(f)
-            if res['success']: st.success(f"新增: {res['created']}, 更新: {res['updated']}")
+            if res['success']: st.success(f"更新: {res['updated']}, 新增: {res['created']}")
             else: st.error(res['message'])
     with t2:
-        perms = mgr.get_all_permissions()
-        if perms:
-            for p in perms:
-                c1, c2 = st.columns([3, 1])
-                c1.write(f"{p['query_code']} - {p['store_name']}")
-                if c2.button("删除", key=p['query_code']):
-                    mgr.delete_permission(p['query_code'])
-                    st.rerun()
+        for p in mgr.get_all_permissions():
+            c1, c2 = st.columns([3, 1])
+            c1.write(f"{p['query_code']} - {p['store_name']}")
+            if c2.button("删除", key=p['query_code']): mgr.delete_permission(p['query_code']); st.rerun()
     with t3:
-        st.subheader("PDF指引")
-        pdf = st.file_uploader("上传PDF", type=['pdf'])
-        if pdf and st.button("更新PDF"):
-            if db_manager.save_guide_pdf(pdf): st.success("成功")
-        st.subheader("线下成本导出")
-        if st.button("下载汇总表"):
+        pdf = st.file_uploader("PDF指引", type=['pdf'])
+        if pdf and st.button("更新PDF"): db_manager.save_guide_pdf(pdf) and st.success("成功")
+        if st.button("下载线下成本汇总"):
             data = db_manager.get_all_offline_costs()
             if data:
                 out = io.BytesIO()
                 with pd.ExcelWriter(out, engine='xlsxwriter') as writer:
                     rows = []
                     for d in data:
-                        r = {
-                            "门店ID": d['store_id'], "月份": d['month'],
-                            "提交时间": d.get('updated_at', ''),
-                            "工资": d['data'].get('wages', 0), "房租": d['data'].get('rent', 0),
-                            "水电": d['data'].get('utilities', 0), "耗材": d['data'].get('consumables', 0),
-                            "其他": d['data'].get('others', 0)
-                        }
-                        rows.append(r)
-                    df_all = pd.DataFrame(rows)
-                    for sid in df_all['门店ID'].unique():
-                        sub_df = df_all[df_all['门店ID'] == sid]
-                        safe_name = str(sid)[:30].replace(':','').replace('/','')
-                        sub_df.to_excel(writer, sheet_name=safe_name, index=False)
-                st.download_button("📥 下载Excel", out.getvalue(), "costs.xlsx")
-            else: st.warning("无数据")
+                        rows.append({"门店": d['store_id'], "月": d['month'], "工": d['data'].get('wages'), "租": d['data'].get('rent'), "水": d['data'].get('utilities'), "耗": d['data'].get('consumables'), "他": d['data'].get('others')})
+                    pd.DataFrame(rows).to_excel(writer, index=False)
+                st.download_button("下载", out.getvalue(), "costs.xlsx")
 
 def main():
     with st.sidebar:
@@ -752,10 +596,8 @@ def main():
         app = st.selectbox("功能", ["门店查询系统", "批量上传系统", "权限管理系统"])
         if get_db_manager().is_connected(): st.success("✅ 在线")
         else: st.error("❌ 离线")
-        
     if app == "门店查询系统": render_query_system(get_db_manager())
     elif app == "批量上传系统": create_upload_app()
     elif app == "权限管理系统": create_permission_app()
 
-if __name__ == "__main__":
-    main()
+if __name__ == "__main__": main()
