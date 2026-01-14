@@ -366,29 +366,59 @@ def rebuild_dataframe_with_headers(raw_data, headers):
     for row in raw_data:
         vals = [row.get(f"col_{i}", "") for i in range(len(headers))]
         data.append(vals)
+    
+    # 初始构建，处理默认表头的重复问题
     unique_headers = []
     ec = 0
     for h in headers:
         if h == "": unique_headers.append(f"_empty_{ec}"); ec += 1
         else: unique_headers.append(h)
+    
     df = pd.DataFrame(data, columns=unique_headers)
     
+    # 智能表头修复逻辑
     if not df.empty:
         first_row = df.iloc[0].astype(str).tolist()
         has_month = any("月" in x for x in first_row)
         has_bad_header = any("_empty_" in h or h == "" for h in unique_headers)
+        
         if has_month and has_bad_header:
-            df.columns = first_row
+            # === 修复点1：对新表头进行强制去重 ===
+            new_cols = []
+            seen = {}
+            for col in first_row:
+                col_name = str(col).strip()
+                if col_name in seen:
+                    seen[col_name] += 1
+                    new_cols.append(f"{col_name}_{seen[col_name]}") # 重复的加后缀，如 合计_1
+                else:
+                    seen[col_name] = 0
+                    new_cols.append(col_name)
+            
+            df.columns = new_cols
             df = df.iloc[1:].reset_index(drop=True)
             
-    if len(df.columns) > 0: df.rename(columns={df.columns[0]: '费项'}, inplace=True)
+    # 强制重命名第一列
+    if len(df.columns) > 0: 
+        # === 修复点2：防止重命名后产生冲突，先检查 ===
+        col0 = df.columns[0]
+        if col0 != '费项':
+            # 如果现有列里已经有叫'费项'的，先把它改名，给第一列腾位置
+            if '费项' in df.columns:
+                cols = list(df.columns)
+                # 找到那个占用'费项'名字的列（不是第一列的那个），改名
+                for i in range(1, len(cols)):
+                    if cols[i] == '费项': cols[i] = '费项_old'
+                df.columns = cols
+            
+            df.rename(columns={df.columns[0]: '费项'}, inplace=True)
     
-    # 核心修复：过滤重复的表头行
+    # 核心过滤
     if '费项' in df.columns:
-        df = df[df['费项'] != '费项']
+        # === 修复点3：使用 iloc[:, 0] 确保只操作第一列，避免因潜在重复名报错 ===
+        df = df[df.iloc[:, 0] != '费项']
         
     return df.fillna("")
-
 def inject_offline_and_calculate(df: pd.DataFrame, store_id: str, db_manager):
     if df.empty: return df
     data_cols = [c for c in df.columns if c not in ['费项', '注释', '序号']]
